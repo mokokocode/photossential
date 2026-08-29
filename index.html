@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Border It</title>
+<meta name="theme-color" content="#1b1b1f" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect x=%2210%22 y=%2210%22 width=%2280%22 height=%2280%22 fill=%22none%22 stroke=%22%23e8734a%22 stroke-width=%2212%22/></svg>" />
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #1b1b1f;
+  --panel: #26262c;
+  --panel-2: #303038;
+  --text: #f2f1ee;
+  --muted: #a8a7b3;
+  --accent: #e8734a;
+  --border: #3a3a42;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  min-height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+.app-header {
+  text-align: center;
+  padding: 24px 16px 8px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px;
+  gap: 16px;
+  width: 100%;
+}
+
+.drop-zone {
+  width: 100%;
+  max-width: 480px;
+  border: 2px dashed var(--border);
+  border-radius: 16px;
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.drop-zone-inner {
+  padding: 48px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.drop-zone-inner svg {
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.drop-zone-inner p {
+  margin: 0;
+}
+
+.drop-zone-inner strong {
+  color: var(--text);
+}
+
+.hint {
+  font-size: 0.85rem;
+}
+
+.editor {
+  width: 100%;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.editor[hidden],
+.drop-zone[hidden] {
+  display: none;
+}
+
+.canvas-wrap {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  background: repeating-conic-gradient(#2a2a30 0% 25%, #232328 0% 50%) 50% / 24px 24px;
+  border-radius: 12px;
+  padding: 12px;
+}
+
+#canvas {
+  max-width: 100%;
+  max-height: 60vh;
+  border-radius: 4px;
+  display: block;
+}
+
+.controls {
+  background: var(--panel);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.control-row {
+  display: grid;
+  grid-template-columns: 64px 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.control-row label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.control-row select,
+.control-row input[type="color"] {
+  width: 100%;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.control-row input[type="color"] {
+  padding: 2px;
+  width: 44px;
+  flex: none;
+}
+
+.control-row:has(#border-color) {
+  grid-template-columns: 64px auto 1fr;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: none;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: none;
+}
+
+.value-pill {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 40px;
+  text-align: right;
+}
+
+.swatches {
+  display: flex;
+  gap: 8px;
+  justify-self: end;
+}
+
+.swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  padding: 0;
+  cursor: pointer;
+}
+
+.swatch:hover {
+  border-color: var(--accent);
+}
+
+.button-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.primary-btn,
+.secondary-btn {
+  flex: 1;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: none;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-btn {
+  background: var(--accent);
+  color: #1b1408;
+}
+
+.primary-btn:active {
+  opacity: 0.85;
+}
+
+.secondary-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.app-footer {
+  text-align: center;
+  padding: 16px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+@media (min-width: 700px) {
+  .app-header h1 {
+    font-size: 2rem;
+  }
+}
+</style>
+</head>
+<body>
+  <header class="app-header">
+    <h1>Border It</h1>
+    <p class="tagline">Add a border to a photo, right from your phone.</p>
+  </header>
+
+  <main>
+    <section id="drop-zone" class="drop-zone">
+      <input type="file" id="file-input" accept="image/*" hidden />
+      <div class="drop-zone-inner" id="drop-zone-inner">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+          <path d="M7 9l5-5 5 5" />
+          <path d="M12 4v13" />
+        </svg>
+        <p><strong>Tap to choose a photo</strong></p>
+        <p class="hint">or drag one in</p>
+      </div>
+    </section>
+
+    <section id="editor" class="editor" hidden>
+      <div class="canvas-wrap">
+        <canvas id="canvas"></canvas>
+      </div>
+
+      <div class="controls">
+        <div class="control-row">
+          <label for="aspect-ratio">Ratio</label>
+          <select id="aspect-ratio">
+            <option value="original">Original</option>
+            <option value="1:1">Square 1:1</option>
+            <option value="4:5">Portrait 4:5</option>
+            <option value="3:4">Portrait 3:4</option>
+            <option value="9:16">Portrait 9:16</option>
+            <option value="5:4">Landscape 5:4</option>
+            <option value="4:3">Landscape 4:3</option>
+            <option value="3:2">Landscape 3:2</option>
+            <option value="16:9">Landscape 16:9</option>
+          </select>
+        </div>
+
+        <div class="control-row">
+          <label for="border-width">Width</label>
+          <input type="range" id="border-width" min="0" max="25" value="6" step="0.5" />
+          <span class="value-pill" id="border-width-value">6%</span>
+        </div>
+
+        <div class="control-row">
+          <label for="border-color">Color</label>
+          <input type="color" id="border-color" value="#ffffff" />
+          <div class="swatches" id="swatches">
+            <button type="button" class="swatch" style="background:#ffffff" data-color="#ffffff" aria-label="White"></button>
+            <button type="button" class="swatch" style="background:#000000" data-color="#000000" aria-label="Black"></button>
+            <button type="button" class="swatch" style="background:#e8734a" data-color="#e8734a" aria-label="Orange"></button>
+            <button type="button" class="swatch" style="background:#2f6f4f" data-color="#2f6f4f" aria-label="Green"></button>
+            <button type="button" class="swatch" style="background:#274b8e" data-color="#274b8e" aria-label="Blue"></button>
+          </div>
+        </div>
+
+        <div class="control-row">
+          <label for="border-style">Style</label>
+          <select id="border-style">
+            <option value="even">Even</option>
+            <option value="polaroid">Polaroid (thick bottom)</option>
+          </select>
+        </div>
+
+        <div class="control-row">
+          <label for="corner-radius">Corners</label>
+          <input type="range" id="corner-radius" min="0" max="60" value="0" step="1" />
+          <span class="value-pill" id="corner-radius-value">0</span>
+        </div>
+
+        <div class="button-row">
+          <button type="button" id="download-btn" class="primary-btn">Download</button>
+          <button type="button" id="reset-btn" class="secondary-btn">Choose another photo</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <p>Runs entirely in your browser — nothing is uploaded anywhere.</p>
+  </footer>
+
+  <script>
+(() => {
+  "use strict";
+
+  const fileInput = document.getElementById("file-input");
+  const dropZone = document.getElementById("drop-zone");
+  const editor = document.getElementById("editor");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+
+  const aspectSelect = document.getElementById("aspect-ratio");
+  const widthSlider = document.getElementById("border-width");
+  const widthValue = document.getElementById("border-width-value");
+  const colorInput = document.getElementById("border-color");
+  const swatches = document.getElementById("swatches");
+  const styleSelect = document.getElementById("border-style");
+  const radiusSlider = document.getElementById("corner-radius");
+  const radiusValue = document.getElementById("corner-radius-value");
+  const downloadBtn = document.getElementById("download-btn");
+  const resetBtn = document.getElementById("reset-btn");
+
+  let currentImage = null;
+  let currentFileBaseName = "photo";
+
+  function openFilePicker() {
+    fileInput.click();
+  }
+
+  dropZone.addEventListener("click", openFilePicker);
+
+  ["dragenter", "dragover"].forEach((evt) => {
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.add("drag-over");
+    });
+  });
+
+  ["dragleave", "drop"].forEach((evt) => {
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("drag-over");
+    });
+  });
+
+  dropZone.addEventListener("drop", (e) => {
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) loadFile(file);
+  });
+
+  fileInput.addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) loadFile(file);
+  });
+
+  function loadFile(file) {
+    if (!file.type.startsWith("image/")) return;
+    currentFileBaseName = (file.name || "photo").replace(/\.[^.]+$/, "") || "photo";
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        currentImage = img;
+        editor.hidden = false;
+        dropZone.hidden = true;
+        render();
+        editor.scrollIntoView({ behavior: "smooth", block: "start" });
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function roundedRectPath(context, x, y, w, h, r) {
+    const radius = Math.max(0, Math.min(r, w / 2, h / 2));
+    context.beginPath();
+    if (context.roundRect) {
+      context.roundRect(x, y, w, h, radius);
+    } else {
+      context.moveTo(x + radius, y);
+      context.arcTo(x + w, y, x + w, y + h, radius);
+      context.arcTo(x + w, y + h, x, y + h, radius);
+      context.arcTo(x, y + h, x, y, radius);
+      context.arcTo(x, y, x + w, y, radius);
+    }
+    context.closePath();
+  }
+
+  // Given the bordered photo's own size (innerW x innerH), find the smallest
+  // canvas with the requested aspect ratio that fully contains it -- so the
+  // photo is never cropped, only padded (letterboxed/pillarboxed) to reach
+  // that shape, centered.
+  function getPaddedCanvasSize(innerW, innerH, ratioValue) {
+    if (ratioValue === "original") {
+      return { canvasW: innerW, canvasH: innerH };
+    }
+
+    const [rw, rh] = ratioValue.split(":").map(Number);
+    const targetRatio = rw / rh;
+
+    let canvasW, canvasH;
+    if (innerW / targetRatio > innerH) {
+      canvasW = innerW;
+      canvasH = innerW / targetRatio;
+    } else {
+      canvasH = innerH;
+      canvasW = innerH * targetRatio;
+    }
+
+    return { canvasW: Math.round(canvasW), canvasH: Math.round(canvasH) };
+  }
+
+  function render() {
+    if (!currentImage) return;
+
+    const imgW = currentImage.naturalWidth;
+    const imgH = currentImage.naturalHeight;
+    const shortSide = Math.min(imgW, imgH);
+
+    const widthPct = parseFloat(widthSlider.value);
+    const style = styleSelect.value;
+    const color = colorInput.value;
+    const radiusPct = parseFloat(radiusSlider.value);
+
+    const baseBorder = Math.round((widthPct / 100) * shortSide);
+
+    let top = baseBorder;
+    let left = baseBorder;
+    let right = baseBorder;
+    let bottom = baseBorder;
+
+    if (style === "polaroid") {
+      bottom = Math.round(baseBorder * 2.6) + (baseBorder === 0 ? Math.round(shortSide * 0.08) : 0);
+    }
+
+    const innerW = imgW + left + right;
+    const innerH = imgH + top + bottom;
+
+    const { canvasW, canvasH } = getPaddedCanvasSize(innerW, innerH, aspectSelect.value);
+
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+
+    // corner radius scales with the shorter output side
+    const radius = Math.round((radiusPct / 100) * Math.min(canvasW, canvasH) * 0.5);
+
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.save();
+    roundedRectPath(ctx, 0, 0, canvasW, canvasH, radius);
+    ctx.clip();
+
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, canvasW, canvasH);
+
+    // center the (photo + its own border frame) box within the canvas
+    const offsetX = Math.round((canvasW - innerW) / 2);
+    const offsetY = Math.round((canvasH - innerH) / 2);
+
+    ctx.drawImage(currentImage, offsetX + left, offsetY + top, imgW, imgH);
+    ctx.restore();
+  }
+
+  widthSlider.addEventListener("input", () => {
+    widthValue.textContent = `${widthSlider.value}%`;
+    render();
+  });
+
+  radiusSlider.addEventListener("input", () => {
+    radiusValue.textContent = radiusSlider.value;
+    render();
+  });
+
+  colorInput.addEventListener("input", render);
+  styleSelect.addEventListener("change", render);
+  aspectSelect.addEventListener("change", render);
+
+  swatches.addEventListener("click", (e) => {
+    const btn = e.target.closest(".swatch");
+    if (!btn) return;
+    colorInput.value = btn.dataset.color;
+    render();
+  });
+
+  downloadBtn.addEventListener("click", () => {
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${currentFileBaseName}-bordered.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }, "image/png");
+  });
+
+  resetBtn.addEventListener("click", () => {
+    currentImage = null;
+    fileInput.value = "";
+    editor.hidden = true;
+    dropZone.hidden = false;
+    dropZone.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+})();
+  </script>
+</body>
+</html>
