@@ -267,6 +267,59 @@ input[type="range"]::-moz-range-thumb {
   border: 1px solid var(--border);
 }
 
+.size-limit-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+#max-size-value {
+  width: 64px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 0 8px;
+}
+
+#max-size-unit {
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  width: 70px;
+}
+
+#max-size-value:disabled,
+#max-size-unit:disabled {
+  opacity: 0.5;
+}
+
+.status-line {
+  margin: 0;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 .app-footer {
   text-align: center;
   padding: 16px;
@@ -354,10 +407,27 @@ input[type="range"]::-moz-range-thumb {
           <span class="value-pill" id="corner-radius-value">0</span>
         </div>
 
+        <div class="control-row size-limit-row">
+          <label for="max-size-toggle">Max size</label>
+          <div class="size-limit-inputs">
+            <label class="checkbox-label">
+              <input type="checkbox" id="max-size-toggle" />
+              Limit to
+            </label>
+            <input type="number" id="max-size-value" min="0.1" step="0.1" value="2" disabled />
+            <select id="max-size-unit" disabled>
+              <option value="MB" selected>MB</option>
+              <option value="KB">KB</option>
+            </select>
+          </div>
+        </div>
+
         <div class="button-row">
           <button type="button" id="download-btn" class="primary-btn">Download</button>
           <button type="button" id="reset-btn" class="secondary-btn">Choose another photo</button>
         </div>
+
+        <p class="status-line" id="status-line" hidden></p>
       </div>
     </section>
   </main>
@@ -386,6 +456,10 @@ input[type="range"]::-moz-range-thumb {
   const radiusValue = document.getElementById("corner-radius-value");
   const downloadBtn = document.getElementById("download-btn");
   const resetBtn = document.getElementById("reset-btn");
+  const maxSizeToggle = document.getElementById("max-size-toggle");
+  const maxSizeValue = document.getElementById("max-size-value");
+  const maxSizeUnit = document.getElementById("max-size-unit");
+  const statusLine = document.getElementById("status-line");
 
   let currentImage = null;
   let currentFileBaseName = "photo";
@@ -549,18 +623,140 @@ input[type="range"]::-moz-range-thumb {
     render();
   });
 
-  downloadBtn.addEventListener("click", () => {
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${currentFileBaseName}-bordered.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-    }, "image/png");
+  maxSizeToggle.addEventListener("change", () => {
+    maxSizeValue.disabled = !maxSizeToggle.checked;
+    maxSizeUnit.disabled = !maxSizeToggle.checked;
+  });
+
+  function canvasToBlob(sourceCanvas, mimeType, quality) {
+    return new Promise((resolve) => sourceCanvas.toBlob(resolve, mimeType, quality));
+  }
+
+  function formatBytes(bytes) {
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+    if (bytes >= 1024) return Math.round(bytes / 1024) + " KB";
+    return Math.round(bytes) + " bytes";
+  }
+
+  function makeScaledCanvas(sourceCanvas, scale) {
+    const scaled = document.createElement("canvas");
+    scaled.width = Math.max(1, Math.round(sourceCanvas.width * scale));
+    scaled.height = Math.max(1, Math.round(sourceCanvas.height * scale));
+    const sctx = scaled.getContext("2d");
+    sctx.imageSmoothingEnabled = true;
+    sctx.imageSmoothingQuality = "high";
+    sctx.drawImage(sourceCanvas, 0, 0, scaled.width, scaled.height);
+    return scaled;
+  }
+
+  const MIN_LOSSLESS_SCALE = 0.05;
+
+  // Strategy, in order of preference (best quality first):
+  //  1. Full-resolution PNG (lossless) -- use it if it already fits.
+  //  2. A smaller PNG (still lossless -- no compression artifacts, just
+  //     fewer pixels). Binary-search the largest scale that still fits.
+  //  3. Only if even a tiny PNG doesn't fit under the limit, fall back to
+  //     JPEG at that smallest scale, using the highest quality that fits
+  //     (this is the only path that can introduce real compression
+  //     artifacts, and it only kicks in for extremely tight limits).
+  async function exportUnderSizeLimit(maxBytes) {
+    const fullPng = await canvasToBlob(canvas, "image/png");
+    if (fullPng.size <= maxBytes) {
+      return { blob: fullPng, ext: "png", method: "original" };
+    }
+
+    const smallestPng = await canvasToBlob(makeScaledCanvas(canvas, MIN_LOSSLESS_SCALE), "image/png");
+    if (smallestPng.size <= maxBytes) {
+      // Binary-search for the largest scale, between our smallest-tried
+      // scale and full size, whose lossless PNG still fits.
+      let lo = MIN_LOSSLESS_SCALE;
+      let hi = 1;
+      let bestScale = lo;
+      let bestBlob = smallestPng;
+      for (let i = 0; i < 8; i++) {
+        const mid = (lo + hi) / 2;
+        const candidate = await canvasToBlob(makeScaledCanvas(canvas, mid), "image/png");
+        if (candidate.size <= maxBytes) {
+          bestScale = mid;
+          bestBlob = candidate;
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      return { blob: bestBlob, ext: "png", method: "resized-lossless", scale: bestScale };
+    }
+
+    // Even the smallest lossless PNG doesn't fit -- lossy JPEG is the only
+    // way left to hit this limit. Maximize quality at that same small size.
+    const tinyCanvas = makeScaledCanvas(canvas, MIN_LOSSLESS_SCALE);
+    let lo = 0.05;
+    let hi = 0.95;
+    const lowestJpeg = await canvasToBlob(tinyCanvas, "image/jpeg", lo);
+    if (lowestJpeg.size > maxBytes) {
+      return { blob: lowestJpeg, ext: "jpg", method: "jpeg-fallback", gaveUp: true };
+    }
+    let best = lowestJpeg;
+    for (let i = 0; i < 7; i++) {
+      const mid = (lo + hi) / 2;
+      const candidate = await canvasToBlob(tinyCanvas, "image/jpeg", mid);
+      if (candidate.size <= maxBytes) {
+        best = candidate;
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    return { blob: best, ext: "jpg", method: "jpeg-fallback" };
+  }
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  downloadBtn.addEventListener("click", async () => {
+    statusLine.hidden = true;
+
+    if (!maxSizeToggle.checked) {
+      const blob = await canvasToBlob(canvas, "image/png");
+      triggerDownload(blob, `${currentFileBaseName}-bordered.png`);
+      return;
+    }
+
+    const value = parseFloat(maxSizeValue.value) || 0;
+    const unit = maxSizeUnit.value;
+    const maxBytes = Math.max(1, Math.round(value * (unit === "MB" ? 1024 * 1024 : 1024)));
+
+    downloadBtn.disabled = true;
+    const originalLabel = downloadBtn.textContent;
+    downloadBtn.textContent = "Working…";
+
+    try {
+      const { blob, ext, method, scale, gaveUp } = await exportUnderSizeLimit(maxBytes);
+      triggerDownload(blob, `${currentFileBaseName}-bordered.${ext}`);
+
+      statusLine.hidden = false;
+      if (gaveUp) {
+        statusLine.textContent = `Even heavy JPEG compression couldn't get under ${formatBytes(maxBytes)} — saved the smallest possible version at ${formatBytes(blob.size)} instead.`;
+      } else if (method === "resized-lossless") {
+        const pct = Math.round(scale * 100);
+        statusLine.textContent = `Saved at ${formatBytes(blob.size)} — resized to ${pct}% to fit under ${formatBytes(maxBytes)}. Still a lossless PNG, so no compression artifacts, just fewer pixels.`;
+      } else if (method === "jpeg-fallback") {
+        statusLine.textContent = `Saved at ${formatBytes(blob.size)} — even resized, a lossless PNG couldn't fit under ${formatBytes(maxBytes)}, so this was converted to JPEG at the highest quality that still fits. Some quality loss is unavoidable at this size.`;
+      } else {
+        statusLine.textContent = `Saved at ${formatBytes(blob.size)}.`;
+      }
+    } finally {
+      downloadBtn.disabled = false;
+      downloadBtn.textContent = originalLabel;
+    }
   });
 
   resetBtn.addEventListener("click", () => {
