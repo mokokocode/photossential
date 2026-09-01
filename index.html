@@ -267,6 +267,39 @@ input[type="range"]::-moz-range-thumb {
   border: 1px solid var(--border);
 }
 
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.section-title-row:first-child {
+  margin-top: 0;
+}
+
+.section-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.text-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 2px;
+}
+
+.text-btn:active {
+  opacity: 0.7;
+}
+
 .size-limit-inputs {
   display: flex;
   align-items: center;
@@ -360,6 +393,33 @@ input[type="range"]::-moz-range-thumb {
       </div>
 
       <div class="controls">
+        <div class="section-title-row">
+          <span class="section-title">Quick edits</span>
+          <button type="button" id="reset-edits-btn" class="text-btn">Reset</button>
+        </div>
+
+        <div class="control-row">
+          <label for="brightness">Bright</label>
+          <input type="range" id="brightness" min="-100" max="100" value="0" step="1" />
+          <span class="value-pill" id="brightness-value">0</span>
+        </div>
+
+        <div class="control-row">
+          <label for="saturation">Vivid</label>
+          <input type="range" id="saturation" min="-100" max="100" value="0" step="1" />
+          <span class="value-pill" id="saturation-value">0</span>
+        </div>
+
+        <div class="control-row">
+          <label for="s-curve">S-Curve</label>
+          <input type="range" id="s-curve" min="0" max="100" value="0" step="1" />
+          <span class="value-pill" id="s-curve-value">0</span>
+        </div>
+
+        <div class="section-title-row">
+          <span class="section-title">Frame</span>
+        </div>
+
         <div class="control-row">
           <label for="aspect-ratio">Ratio</label>
           <select id="aspect-ratio">
@@ -461,8 +521,35 @@ input[type="range"]::-moz-range-thumb {
   const maxSizeUnit = document.getElementById("max-size-unit");
   const statusLine = document.getElementById("status-line");
 
+  const brightnessSlider = document.getElementById("brightness");
+  const brightnessValue = document.getElementById("brightness-value");
+  const saturationSlider = document.getElementById("saturation");
+  const saturationValue = document.getElementById("saturation-value");
+  const curveSlider = document.getElementById("s-curve");
+  const curveValue = document.getElementById("s-curve-value");
+  const resetEditsBtn = document.getElementById("reset-edits-btn");
+
   let currentImage = null;
   let currentFileBaseName = "photo";
+
+  // Cache of the photo with brightness/saturation/S-curve baked in, so those
+  // (relatively expensive, per-pixel) adjustments are only recomputed when
+  // they actually change -- not on every render triggered by an unrelated
+  // control like border width or color.
+  let adjustedPhotoCanvas = null;
+  let adjustedPhotoKey = null;
+
+  // Coalesce rapid slider "input" events (e.g. dragging) into at most one
+  // render per animation frame.
+  let renderScheduled = false;
+  function scheduleRender() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(() => {
+      renderScheduled = false;
+      render();
+    });
+  }
 
   function openFilePicker() {
     fileInput.click();
@@ -503,6 +590,8 @@ input[type="range"]::-moz-range-thumb {
       const img = new Image();
       img.onload = () => {
         currentImage = img;
+        adjustedPhotoCanvas = null;
+        adjustedPhotoKey = null;
         editor.hidden = false;
         dropZone.hidden = true;
         render();
@@ -552,6 +641,77 @@ input[type="range"]::-moz-range-thumb {
     return { canvasW: Math.round(canvasW), canvasH: Math.round(canvasH) };
   }
 
+  function clamp8(v) {
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+
+  // 256-entry lookup table combining a brightness offset with an S-curve
+  // (a smoothstep blend: gentle near black/white, steeper through the
+  // midtones -- the classic photo-editing "pop" curve). curveAmount is
+  // 0 (no effect) to 1 (full curve); kept in that range so the result
+  // stays monotonic (no posterization/inversion artifacts).
+  function buildToneLUT(brightness, curveAmount) {
+    const lut = new Uint8ClampedArray(256);
+    for (let i = 0; i < 256; i++) {
+      const withBrightness = clamp8(i + brightness);
+      const x = withBrightness / 255;
+      const smoothstep = x * x * (3 - 2 * x);
+      const y = x + curveAmount * (smoothstep - x);
+      lut[i] = Math.round(clamp8(y * 255));
+    }
+    return lut;
+  }
+
+  // Returns a canvas containing just the photo (no border/padding) with
+  // brightness, saturation, and S-curve baked in. Cached and only
+  // recomputed when the adjustment values (or the photo itself) change.
+  function getAdjustedPhotoCanvas(imgW, imgH) {
+    const brightness = parseInt(brightnessSlider.value, 10);
+    const saturation = parseInt(saturationSlider.value, 10);
+    const curveAmount = parseInt(curveSlider.value, 10) / 100;
+    const key = `${brightness}|${saturation}|${curveAmount}|${imgW}x${imgH}`;
+
+    if (adjustedPhotoCanvas && adjustedPhotoKey === key) {
+      return adjustedPhotoCanvas;
+    }
+
+    const photoCanvas = document.createElement("canvas");
+    photoCanvas.width = imgW;
+    photoCanvas.height = imgH;
+    const pctx = photoCanvas.getContext("2d");
+    pctx.drawImage(currentImage, 0, 0, imgW, imgH);
+
+    if (brightness !== 0 || saturation !== 0 || curveAmount !== 0) {
+      const lut = buildToneLUT(brightness, curveAmount);
+      const satFactor = 1 + saturation / 100;
+      const imageData = pctx.getImageData(0, 0, imgW, imgH);
+      const data = imageData.data;
+
+      for (let i = 0; i < data.length; i += 4) {
+        let r = lut[data[i]];
+        let g = lut[data[i + 1]];
+        let b = lut[data[i + 2]];
+
+        if (saturation !== 0) {
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          r = lum + (r - lum) * satFactor;
+          g = lum + (g - lum) * satFactor;
+          b = lum + (b - lum) * satFactor;
+        }
+
+        data[i] = clamp8(r);
+        data[i + 1] = clamp8(g);
+        data[i + 2] = clamp8(b);
+      }
+
+      pctx.putImageData(imageData, 0, 0);
+    }
+
+    adjustedPhotoCanvas = photoCanvas;
+    adjustedPhotoKey = key;
+    return photoCanvas;
+  }
+
   function render() {
     if (!currentImage) return;
 
@@ -598,23 +758,49 @@ input[type="range"]::-moz-range-thumb {
     const offsetX = Math.round((canvasW - innerW) / 2);
     const offsetY = Math.round((canvasH - innerH) / 2);
 
-    ctx.drawImage(currentImage, offsetX + left, offsetY + top, imgW, imgH);
+    const adjustedPhoto = getAdjustedPhotoCanvas(imgW, imgH);
+    ctx.drawImage(adjustedPhoto, offsetX + left, offsetY + top, imgW, imgH);
     ctx.restore();
   }
 
   widthSlider.addEventListener("input", () => {
     widthValue.textContent = `${widthSlider.value}%`;
-    render();
+    scheduleRender();
   });
 
   radiusSlider.addEventListener("input", () => {
     radiusValue.textContent = radiusSlider.value;
-    render();
+    scheduleRender();
   });
 
-  colorInput.addEventListener("input", render);
-  styleSelect.addEventListener("change", render);
-  aspectSelect.addEventListener("change", render);
+  colorInput.addEventListener("input", scheduleRender);
+  styleSelect.addEventListener("change", scheduleRender);
+  aspectSelect.addEventListener("change", scheduleRender);
+
+  brightnessSlider.addEventListener("input", () => {
+    brightnessValue.textContent = brightnessSlider.value;
+    scheduleRender();
+  });
+
+  saturationSlider.addEventListener("input", () => {
+    saturationValue.textContent = saturationSlider.value;
+    scheduleRender();
+  });
+
+  curveSlider.addEventListener("input", () => {
+    curveValue.textContent = curveSlider.value;
+    scheduleRender();
+  });
+
+  resetEditsBtn.addEventListener("click", () => {
+    brightnessSlider.value = "0";
+    saturationSlider.value = "0";
+    curveSlider.value = "0";
+    brightnessValue.textContent = "0";
+    saturationValue.textContent = "0";
+    curveValue.textContent = "0";
+    scheduleRender();
+  });
 
   swatches.addEventListener("click", (e) => {
     const btn = e.target.closest(".swatch");
