@@ -346,6 +346,13 @@ input[type="range"]::-moz-range-thumb {
   opacity: 0.5;
 }
 
+.preset-note {
+  margin: -8px 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
 .status-line {
   margin: 0;
   text-align: center;
@@ -393,6 +400,21 @@ input[type="range"]::-moz-range-thumb {
       </div>
 
       <div class="controls">
+        <div class="section-title-row">
+          <span class="section-title">Film</span>
+        </div>
+
+        <div class="control-row">
+          <label for="film-preset">Preset</label>
+          <select id="film-preset">
+            <option value="none">None</option>
+            <option value="aerochrome">Aerochrome (IR)</option>
+            <option value="kodachrome">Kodachrome-ish</option>
+            <option value="bw">Classic B&amp;W</option>
+          </select>
+        </div>
+        <p class="preset-note" id="preset-note" hidden></p>
+
         <div class="section-title-row">
           <span class="section-title">Quick edits</span>
           <button type="button" id="reset-edits-btn" class="text-btn">Reset</button>
@@ -528,6 +550,16 @@ input[type="range"]::-moz-range-thumb {
   const curveSlider = document.getElementById("s-curve");
   const curveValue = document.getElementById("s-curve-value");
   const resetEditsBtn = document.getElementById("reset-edits-btn");
+  const filmPresetSelect = document.getElementById("film-preset");
+  const presetNote = document.getElementById("preset-note");
+
+  const PRESET_NOTES = {
+    aerochrome:
+      "A stylized approximation, not real infrared. Real Aerochrome captures near-infrared light a phone camera never records. This shifts green foliage to hot pink/magenta (a hue rotation, like the real film's chlorophyll response) while leaving sky, water, skin, and other non-green content close to natural — matching how the real film actually looks. Best on photos with lots of daylight greenery.",
+    kodachrome:
+      "A warm, punchy, slide-film-inspired color grade: deeper blues, a slight lift in reds/yellows, and a bit more contrast.",
+    bw: "A simple luminance-based black & white conversion with a bit of extra contrast, evoking classic panchromatic film.",
+  };
 
   let currentImage = null;
   let currentFileBaseName = "photo";
@@ -641,8 +673,13 @@ input[type="range"]::-moz-range-thumb {
     return { canvasW: Math.round(canvasW), canvasH: Math.round(canvasH) };
   }
 
+  // Clamps to 0-255 AND rounds to an integer -- callers use this output both
+  // as a final pixel value and, for film presets, as an index into the
+  // Uint8ClampedArray tone LUT, which silently returns undefined (collapsing
+  // to black) for a non-integer index. Always round before that lookup.
   function clamp8(v) {
-    return v < 0 ? 0 : v > 255 ? 255 : v;
+    const r = Math.round(v);
+    return r < 0 ? 0 : r > 255 ? 255 : r;
   }
 
   // 256-entry lookup table combining a brightness offset with an S-curve
@@ -662,14 +699,161 @@ input[type="range"]::-moz-range-thumb {
     return lut;
   }
 
-  // Returns a canvas containing just the photo (no border/padding) with
-  // brightness, saturation, and S-curve baked in. Cached and only
-  // recomputed when the adjustment values (or the photo itself) change.
+  // r,g,b in 0-255 -> [h in 0-360, s in 0-1, l in 0-1]
+  function rgbToHsl(r, g, b) {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    const delta = max - min;
+    let h = 0;
+    let s = 0;
+    if (delta !== 0) {
+      s = delta / (1 - Math.abs(2 * l - 1));
+      if (max === r) {
+        let h1 = (g - b) / delta;
+        if (h1 < 0) h1 += 6;
+        h = 60 * h1;
+      } else if (max === g) {
+        h = 60 * ((b - r) / delta + 2);
+      } else {
+        h = 60 * ((r - g) / delta + 4);
+      }
+    }
+    return [h, s, l];
+  }
+
+  // h in 0-360, s/l in 0-1 -> [r, g, b] in 0-255 (rounded/clamped)
+  function hslToRgb(h, s, l) {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const hp = ((h % 360) + 360) % 360 / 60;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r1 = 0, g1 = 0, b1 = 0;
+    if (hp < 1) { r1 = c; g1 = x; b1 = 0; }
+    else if (hp < 2) { r1 = x; g1 = c; b1 = 0; }
+    else if (hp < 3) { r1 = 0; g1 = c; b1 = x; }
+    else if (hp < 4) { r1 = 0; g1 = x; b1 = c; }
+    else if (hp < 5) { r1 = x; g1 = 0; b1 = c; }
+    else { r1 = c; g1 = 0; b1 = x; }
+    const m = l - c / 2;
+    return [clamp8((r1 + m) * 255), clamp8((g1 + m) * 255), clamp8((b1 + m) * 255)];
+  }
+
+  // Film presets. Each returns [r, g, b] given a pixel's original channels.
+  //
+  // "aerochrome" approximates the look of Kodak Aerochrome color-infrared
+  // film. The real film has three emulsion layers sensitized to green, red,
+  // and near-infrared light (blue is blocked with a yellow filter); healthy
+  // chlorophyll-rich foliage reflects near-infrared very strongly, so it
+  // exposes the IR-sensitive layer and prints as vivid red/magenta/pink,
+  // while the other layers are shifted down a step. Crucially, that
+  // dramatic shift is specific to chlorophyll -- skies, water, skin, and
+  // most other materials don't reflect much extra near-infrared, so in real
+  // Aerochrome photos they stay comparatively close to their natural color.
+  // A phone photo has no infrared channel to draw on, so this is
+  // necessarily a stylized approximation, not a physically accurate
+  // simulation.
+  //
+  // Ordinary photographed foliage is rarely a saturated, numerically
+  // green-dominant color -- daylight grass and leaves are usually a muted,
+  // fairly desaturated green. Rotating that kind of color 180 degrees in
+  // RGB space (the classic "invert + Color blend" trick) lands on an
+  // equally muted, muddy complementary color, not the vivid pink/magenta
+  // real Aerochrome produces -- so instead of rotating the pixel's own
+  // (often weak) color, foliage-like pixels are blended straight in RGB
+  // space toward a fixed, strongly saturated target color (hot pink/
+  // magenta-red) computed at the SAME lightness as the source pixel, so
+  // shape and shading still read naturally. "Foliage-like" is judged by
+  // hue (how close to pure green, 120 degrees) and by chroma (near-gray
+  // pixels are faded out so neutrals stay untinted); everything far from
+  // green -- sky, skin, red objects -- keeps its color untouched. The
+  // blend weight is eased (square-root) so partial matches move quickly
+  // toward the vivid target instead of lingering in a muddy in-between
+  // color. (Blending is done in RGB, not by interpolating the hue angle,
+  // because a pixel that starts out cyan-ish is roughly opposite magenta
+  // on the color wheel -- a hue-angle interpolation from there passes
+  // through blue/violet at partial strength, which real Aerochrome never
+  // shows. A straight RGB blend has no such detour: partial matches land
+  // on a muted warm plum/maroon instead.)
+  //
+  // The hue window is deliberately lopsided: narrow toward yellow (hue
+  // below 120), wide toward cyan (hue above 120) for pixels that aren't
+  // bright. Distant or shaded tree cover is still real chlorophyll, but
+  // ordinary cameras render it hazy and blue-shifted rather than green --
+  // haze and shade both push a photographed hillside's hue toward
+  // blue-green/teal well before it looks anywhere near "washed out to sky
+  // color", not because there's less foliage but because there's more
+  // atmosphere and less direct light in the way (real infrared film
+  // actually sees *through* that haze better than visible light does,
+  // which is why real Aerochrome shows distant tree cover clearly).
+  // Without this, hillsides of shaded or distant trees were being skipped
+  // entirely as "too blue" even though a person looking at the photo reads
+  // them as forest, just a paler/hazier version of it. This is a genuinely
+  // fuzzy line -- a hazy blue-gray mountainside and a hazy blue-gray sky
+  // or lake can land very close together in hue, lightness, and chroma --
+  // a lake in particular often reflects the same washed-out sky/mountain
+  // haze it sits next to, so its color can be nearly indistinguishable
+  // from the far shore behind it. Measured against a real photo like that
+  // (hazy mountains next to a reflective lake), a wide enough window to
+  // meaningfully catch the paler mountains also washed the entire lake
+  // pink -- so this is tuned to a narrower, measured middle ground:
+  // clearly better mountain coverage than a small fixed window, while
+  // keeping typical lake/sky pixels affected only slightly.
+  function applyFilmPreset(r, g, b, preset) {
+    switch (preset) {
+      case "aerochrome": {
+        const [hue, sat, light] = rgbToHsl(r, g, b);
+
+        const towardCyan = hue > 120;
+        const darknessExtra = towardCyan ? 100 * Math.max(0, 1 - light / 0.55) : 0;
+        const window = 75 + darknessExtra;
+        const hueDistance = Math.abs(hue - 120);
+        const hueWeight = Math.max(0, 1 - hueDistance / window);
+
+        const chromaWeight = Math.min(1, sat / 0.15);
+        const greenness = hueWeight * chromaWeight;
+        const eased = Math.sqrt(greenness);
+
+        const [tr, tg, tb] = hslToRgb(330, Math.max(sat, 0.85), light);
+        return [
+          clamp8(r + (tr - r) * eased),
+          clamp8(g + (tg - g) * eased),
+          clamp8(b + (tb - b) * eased),
+        ];
+      }
+      case "kodachrome": {
+        // Warm, punchy slide-film-inspired grade: deeper blues, a lift in
+        // reds/yellows, a touch more contrast. A creative homage, not a
+        // researched reproduction of real Kodachrome dye curves.
+        const nr = clamp8(r * 1.14 + g * 0.02 - b * 0.05 + 8);
+        const ng = clamp8(g * 1.04 - r * 0.02 + 2);
+        const nb = clamp8(b * 1.1 - g * 0.02);
+        return [nr, ng, nb];
+      }
+      case "bw": {
+        const y = 0.299 * r + 0.587 * g + 0.114 * b;
+        // mild S-curve for a bit of classic-film punch
+        const x = y / 255;
+        const s = x * x * (3 - 2 * x);
+        const y2 = clamp8((x + 0.35 * (s - x)) * 255);
+        return [y2, y2, y2];
+      }
+      default:
+        return [r, g, b];
+    }
+  }
+
+  // Returns a canvas containing just the photo (no border/padding) with the
+  // film preset, brightness, saturation, and S-curve baked in. Cached and
+  // only recomputed when those values (or the photo itself) change.
   function getAdjustedPhotoCanvas(imgW, imgH) {
     const brightness = parseInt(brightnessSlider.value, 10);
     const saturation = parseInt(saturationSlider.value, 10);
     const curveAmount = parseInt(curveSlider.value, 10) / 100;
-    const key = `${brightness}|${saturation}|${curveAmount}|${imgW}x${imgH}`;
+    const preset = filmPresetSelect.value;
+    const key = `${preset}|${brightness}|${saturation}|${curveAmount}|${imgW}x${imgH}`;
 
     if (adjustedPhotoCanvas && adjustedPhotoKey === key) {
       return adjustedPhotoCanvas;
@@ -681,16 +865,18 @@ input[type="range"]::-moz-range-thumb {
     const pctx = photoCanvas.getContext("2d");
     pctx.drawImage(currentImage, 0, 0, imgW, imgH);
 
-    if (brightness !== 0 || saturation !== 0 || curveAmount !== 0) {
+    if (preset !== "none" || brightness !== 0 || saturation !== 0 || curveAmount !== 0) {
       const lut = buildToneLUT(brightness, curveAmount);
       const satFactor = 1 + saturation / 100;
       const imageData = pctx.getImageData(0, 0, imgW, imgH);
       const data = imageData.data;
 
       for (let i = 0; i < data.length; i += 4) {
-        let r = lut[data[i]];
-        let g = lut[data[i + 1]];
-        let b = lut[data[i + 2]];
+        let [r, g, b] = applyFilmPreset(data[i], data[i + 1], data[i + 2], preset);
+
+        r = lut[r];
+        g = lut[g];
+        b = lut[b];
 
         if (saturation !== 0) {
           const lum = 0.299 * r + 0.587 * g + 0.114 * b;
@@ -776,6 +962,13 @@ input[type="range"]::-moz-range-thumb {
   colorInput.addEventListener("input", scheduleRender);
   styleSelect.addEventListener("change", scheduleRender);
   aspectSelect.addEventListener("change", scheduleRender);
+
+  filmPresetSelect.addEventListener("change", () => {
+    const note = PRESET_NOTES[filmPresetSelect.value];
+    presetNote.hidden = !note;
+    presetNote.textContent = note || "";
+    scheduleRender();
+  });
 
   brightnessSlider.addEventListener("input", () => {
     brightnessValue.textContent = brightnessSlider.value;
