@@ -2772,6 +2772,17 @@ html.ui-mobile .control-row {
 
   updateUiModeToggleLabel();
 })();
+
+// Offline support: registers sw.js (a separate file next to this one) so
+// the tool keeps working with no signal after it's been opened at least
+// once online. Silently does nothing if sw.js isn't present yet (e.g. you
+// haven't uploaded it to the repo) or the page was opened as a local
+// file, so it's safe either way.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}
   </script>
 </body>
 </html>
