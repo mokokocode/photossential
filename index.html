@@ -870,6 +870,17 @@ html.ui-desktop #canvas {
   max-height: 80vh;
 }
 
+/* Bug fix: this desktop max-height override has higher specificity (an
+   extra "html" type selector) than the plain "#canvas.zoomed-preview"
+   reset below, so without this rule it always won even while zoomed --
+   clamping the canvas's on-screen height to 80vh while its width scaled
+   freely, which squashed/stretched the zoomed preview out of its true
+   aspect ratio. Re-declaring the reset at matching specificity here
+   fixes it. */
+html.ui-desktop #canvas.zoomed-preview {
+  max-height: none;
+}
+
 /* Mobile mode: a bit tighter than the default spacing so more of the
    controls panel fits on screen without scrolling. */
 html.ui-mobile main {
@@ -1258,7 +1269,7 @@ html.ui-mobile .control-row {
   }
 
   zoomInBtn.addEventListener("click", () => {
-    previewZoom = Math.min(3, previewZoom + 0.5);
+    previewZoom = Math.min(5, previewZoom + 0.5);
     applyPreviewZoom();
   });
   zoomOutBtn.addEventListener("click", () => {
@@ -1297,7 +1308,7 @@ html.ui-mobile .control-row {
     (e) => {
       if (!pinchActive || e.touches.length !== 2) return;
       if (pinchStartDist > 0) {
-        previewZoom = Math.min(3, Math.max(1, pinchStartZoom * (touchDistance(e.touches) / pinchStartDist)));
+        previewZoom = Math.min(5, Math.max(1, pinchStartZoom * (touchDistance(e.touches) / pinchStartDist)));
         applyPreviewZoom();
       }
       e.preventDefault();
