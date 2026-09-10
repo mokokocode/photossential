@@ -259,6 +259,11 @@ main {
   cursor: crosshair;
 }
 
+#canvas.wb-picking {
+  touch-action: none;
+  cursor: crosshair;
+}
+
 /* Bottom-centered instruction banner shown only while the Level-line tool
    (see #level-line-btn) is active -- same overlay styling as .compare-btn,
    just anchored to the opposite edge so the two never collide. */
@@ -741,6 +746,67 @@ input[type="range"]::-moz-range-thumb {
   border-radius: 4px;
 }
 
+.wb-pick-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* Small eyedropper buttons for the manual shadow/highlight white-balance
+   picks, next to the Auto WB checkbox. Color-coded (navy = shadow,
+   yellow = highlight) so the button's own fill matches the suggestion
+   dots drawn on the photo while that eyedropper is active -- glance at
+   a dot, know instantly which button put it there. */
+.wb-pick-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
+}
+
+.wb-pick-shadow {
+  background: var(--accent-ink);
+  color: #fff;
+}
+
+.wb-pick-highlight {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* Waiting for a tap on the photo. */
+.wb-pick-btn.active {
+  outline: 3px solid var(--secondary);
+  outline-offset: 2px;
+}
+
+/* A pick has already been committed for this eyedropper -- a violet ring
+   distinguishes it from the plain (never-used) state without disturbing
+   the navy/yellow identity color. */
+.wb-pick-btn.picked {
+  box-shadow: 0 0 0 2px var(--secondary), var(--shadow-sm);
+}
+
+.wb-pick-btn:not(:disabled):active {
+  transform: translate(1px, 1px);
+  box-shadow: 0 0 0 var(--border);
+}
+
+@media (hover: hover) {
+  .wb-pick-btn:not(.active):hover {
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-sm-hover);
+  }
+}
+
 #max-size-value {
   width: 64px;
   height: 36px;
@@ -1059,6 +1125,14 @@ html.ui-mobile .control-row {
             <input type="checkbox" id="auto-wb" />
             Neutralize color cast
           </label>
+          <div class="wb-pick-buttons">
+            <button type="button" id="wb-pick-shadow-btn" class="wb-pick-btn wb-pick-shadow" title="Tap, then tap a shadow point on the photo to fix any remaining color cast there">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6" /><path d="M8.5 9.5 4 14l-1 6 6-1 4.5-4.5" /><circle cx="5" cy="19" r="1.4" fill="currentColor" stroke="none" /></svg>
+            </button>
+            <button type="button" id="wb-pick-highlight-btn" class="wb-pick-btn wb-pick-highlight" title="Tap, then tap a highlight point on the photo to fix any remaining color cast there">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6" /><path d="M8.5 9.5 4 14l-1 6 6-1 4.5-4.5" /><circle cx="5" cy="19" r="1.4" fill="currentColor" stroke="none" /></svg>
+            </button>
+          </div>
         </div>
 
         <div class="control-row">
@@ -1175,6 +1249,8 @@ html.ui-mobile .control-row {
   const levelLineHint = document.getElementById("level-line-hint");
   const resetEditsBtn = document.getElementById("reset-edits-btn");
   const autoWbToggle = document.getElementById("auto-wb");
+  const wbPickShadowBtn = document.getElementById("wb-pick-shadow-btn");
+  const wbPickHighlightBtn = document.getElementById("wb-pick-highlight-btn");
 
   let currentImage = null;
   let currentFileBaseName = "photo";
@@ -1189,6 +1265,21 @@ html.ui-mobile .control-row {
   // Auto white balance gains, computed once per photo (they only depend on
   // the photo's own colors, not on any slider), then reused every render.
   let whiteBalanceGains = null;
+
+  // Manual shadow/highlight white-balance picks: a targeted fix for
+  // whatever color cast Auto WB's gray-world average doesn't fully catch
+  // (see getWhiteBalanceGains' notes on its median-saturation sampling --
+  // a cast concentrated in one moderately-saturated region can slip past
+  // it). Each pick is { lum, gain: {r,g,b} } -- the luminance the sample
+  // was taken at, and the per-channel multiplier that would have made
+  // that exact sample neutral gray. wbPickMode is "shadow" | "highlight"
+  // | null while waiting for the user to tap the photo; wbPickCandidates
+  // holds the current auto-suggested dot positions (photo-local pixel
+  // space) shown while a pick is in progress.
+  let wbPickMode = null;
+  let wbPickCandidates = null;
+  let wbShadowPick = null;
+  let wbHighlightPick = null;
 
   // Rotate/flip: a per-photo geometric fix (sideways import, mirrored
   // selfie), so -- like crop pan/zoom and the brightness/vivid/S-curve
@@ -1467,6 +1558,11 @@ html.ui-mobile .control-row {
         adjustedPhotoCanvas = null;
         adjustedPhotoKey = null;
         whiteBalanceGains = null;
+        wbPickMode = null;
+        wbPickCandidates = null;
+        wbShadowPick = null;
+        wbHighlightPick = null;
+        updateWbPickButtonStates();
         rawPhotoCanvas = null;
         compareMode = false;
         comparePos = 0.5;
@@ -1654,6 +1750,143 @@ html.ui-mobile .control-row {
     return whiteBalanceGains;
   }
 
+  // Given a color sampled from the photo, returns the per-channel gain
+  // that would turn that exact sample into neutral gray at its own
+  // luminance -- i.e. "make whatever cast is at this one point go away".
+  // Clamped wider than Auto WB's gray-world gains (0.5-2.0 vs 0.6-1.6)
+  // since this is a single deliberate pick, not an automatic whole-photo
+  // average -- it's allowed to work harder on the one spot the user
+  // pointed at.
+  function computeNeutralizeGain(r, g, b) {
+    const lum = (r + g + b) / 3;
+    const clampGain = (g_) => Math.min(2.0, Math.max(0.5, g_));
+    return {
+      lum,
+      gain: {
+        r: clampGain(lum / Math.max(1, r)),
+        g: clampGain(lum / Math.max(1, g)),
+        b: clampGain(lum / Math.max(1, b)),
+      },
+    };
+  }
+
+  // Samples a small patch (not just one pixel -- avoids the pick landing
+  // on a noise speck or a single oddly-lit pixel) around a tapped point,
+  // in the same color space the manual gain is applied in: raw, then
+  // Auto WB's gain if that's on -- exactly the r0/g0/b0 state right
+  // before the manual-gain step in getAdjustedPhotoCanvas below. Sampling
+  // and applying at the same pipeline stage is what makes the picked
+  // point come out exactly neutral once the gain is applied.
+  function sampleBaseColorAt(px, py, imgW, imgH, cropRect) {
+    const raw = getRawPhotoCanvas(imgW, imgH, cropRect);
+    const rctx = raw.getContext("2d");
+    const half = 2;
+    const x0 = Math.max(0, Math.min(imgW - 1, Math.round(px) - half));
+    const y0 = Math.max(0, Math.min(imgH - 1, Math.round(py) - half));
+    const w = Math.max(1, Math.min(imgW - x0, half * 2 + 1));
+    const h = Math.max(1, Math.min(imgH - y0, half * 2 + 1));
+    const { data } = rctx.getImageData(x0, y0, w, h);
+    let sumR = 0, sumG = 0, sumB = 0, n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      sumR += data[i];
+      sumG += data[i + 1];
+      sumB += data[i + 2];
+      n++;
+    }
+    let r = sumR / Math.max(1, n);
+    let g = sumG / Math.max(1, n);
+    let b = sumB / Math.max(1, n);
+    if (autoWbToggle.checked) {
+      const gains = getWhiteBalanceGains();
+      r = clamp8(r * gains.r);
+      g = clamp8(g * gains.g);
+      b = clamp8(b * gains.b);
+    }
+    return { r, g, b };
+  }
+
+  // Builds a 256-entry per-channel gain lookup, indexed by pixel
+  // luminance, that blends smoothly between the shadow and highlight
+  // picks -- no hard cutoff/banding at any particular tone. A pick that
+  // hasn't been made yet is treated as a neutral (1.0 gain) anchor at
+  // that end of the tone range (luminance 0 for shadow, 255 for
+  // highlight), so having only one of the two still fades out cleanly
+  // toward the opposite end rather than recoloring the whole photo
+  // uniformly.
+  function buildManualWbGainLUT(shadowPick, highlightPick) {
+    if (!shadowPick && !highlightPick) return null;
+    const shadowAnchor = shadowPick || { lum: 0, gain: { r: 1, g: 1, b: 1 } };
+    const highlightAnchor = highlightPick || { lum: 255, gain: { r: 1, g: 1, b: 1 } };
+    const span = highlightAnchor.lum - shadowAnchor.lum;
+    const rLUT = new Float32Array(256);
+    const gLUT = new Float32Array(256);
+    const bLUT = new Float32Array(256);
+    for (let l = 0; l < 256; l++) {
+      const t = span > 0 ? Math.min(1, Math.max(0, (l - shadowAnchor.lum) / span)) : 0.5;
+      rLUT[l] = shadowAnchor.gain.r + (highlightAnchor.gain.r - shadowAnchor.gain.r) * t;
+      gLUT[l] = shadowAnchor.gain.g + (highlightAnchor.gain.g - shadowAnchor.gain.g) * t;
+      bLUT[l] = shadowAnchor.gain.b + (highlightAnchor.gain.b - shadowAnchor.gain.b) * t;
+    }
+    return { r: rLUT, g: gLUT, b: bLUT };
+  }
+
+  // Scans a downscaled copy of the current (raw) photo for good shadow or
+  // highlight reference points -- dark-but-not-crushed or
+  // bright-but-not-blown-out, and low-saturation (a calm, roughly neutral
+  // surface reads a color cast far more reliably than a vividly-colored
+  // one). Reuses the same "least-saturated" reasoning as
+  // getWhiteBalanceGains, but keeps the least saturated 20% within the
+  // right tone band, then greedily spreads a handful of picks apart from
+  // each other so the suggestions sample different parts of the photo
+  // instead of clustering on one patch. Returns points in photo-local
+  // pixel space (0..imgW, 0..imgH) -- the same space drawFrame draws the
+  // photo in, and what the crop-adjust/compare code already treats as
+  // the photo's own coordinate space.
+  function findWbCandidates(mode, imgW, imgH, cropRect) {
+    const rawPhoto = getRawPhotoCanvas(imgW, imgH, cropRect);
+    const maxDim = 150;
+    const scale = Math.min(1, maxDim / Math.max(imgW, imgH));
+    const sw = Math.max(1, Math.round(imgW * scale));
+    const sh = Math.max(1, Math.round(imgH * scale));
+    const sampleCanvas = document.createElement("canvas");
+    sampleCanvas.width = sw;
+    sampleCanvas.height = sh;
+    const sctx = sampleCanvas.getContext("2d");
+    sctx.drawImage(rawPhoto, 0, 0, sw, sh);
+    const { data } = sctx.getImageData(0, 0, sw, sh);
+
+    const [lumLo, lumHi] = mode === "shadow" ? [12, 95] : [160, 243];
+
+    const inBand = [];
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        const i = (y * sw + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const lum = (r + g + b) / 3;
+        if (lum < lumLo || lum > lumHi) continue;
+        const maxC = Math.max(r, g, b);
+        const minC = Math.min(r, g, b);
+        const sat = maxC > 0 ? (maxC - minC) / maxC : 0;
+        inBand.push({ x, y, sat });
+      }
+    }
+    if (inBand.length === 0) return [];
+    inBand.sort((a, b) => a.sat - b.sat);
+    const pool = inBand.slice(0, Math.max(1, Math.floor(inBand.length * 0.2)));
+
+    const picked = [];
+    const minDist = Math.min(sw, sh) * 0.18;
+    for (const p of pool) {
+      if (picked.length >= 4) break;
+      const tooClose = picked.some((q) => Math.hypot(p.x - q.x, p.y - q.y) < minDist);
+      if (tooClose) continue;
+      picked.push(p);
+    }
+    if (picked.length === 0) picked.push(pool[0]);
+
+    return picked.map((p) => ({ x: Math.round(p.x / scale), y: Math.round(p.y / scale) }));
+  }
+
   // Returns a canvas containing just the photo (no border/padding) with
   // auto white balance, brightness, saturation, and S-curve baked in.
   // Cached and only recomputed when those values (or the photo itself)
@@ -1687,7 +1920,9 @@ html.ui-mobile .control-row {
     const autoWb = autoWbToggle.checked;
     const rotatedFull = getRotatedFullCanvas();
     const cropKey = cropRect ? `${cropRect.x},${cropRect.y},${cropRect.w},${cropRect.h}` : "full";
-    const key = `${brightness}|${saturation}|${curveAmount}|${autoWb}|${imgW}x${imgH}|${cropKey}|${rotatedFullKey}`;
+    const pickKey = (p) => (p ? `${p.lum.toFixed(1)},${p.gain.r.toFixed(3)},${p.gain.g.toFixed(3)},${p.gain.b.toFixed(3)}` : "x");
+    const wbKey = `${pickKey(wbShadowPick)}|${pickKey(wbHighlightPick)}`;
+    const key = `${brightness}|${saturation}|${curveAmount}|${autoWb}|${wbKey}|${imgW}x${imgH}|${cropKey}|${rotatedFullKey}`;
 
     if (adjustedPhotoCanvas && adjustedPhotoKey === key) {
       return adjustedPhotoCanvas;
@@ -1704,7 +1939,9 @@ html.ui-mobile .control-row {
     const sy = cropRect ? cropRect.y : 0;
     pctx.drawImage(rotatedFull, sx, sy, imgW, imgH, 0, 0, imgW, imgH);
 
-    if (brightness !== 0 || saturation !== 0 || curveAmount !== 0 || autoWb) {
+    const manualWbLUT = buildManualWbGainLUT(wbShadowPick, wbHighlightPick);
+
+    if (brightness !== 0 || saturation !== 0 || curveAmount !== 0 || autoWb || manualWbLUT) {
       const lut = buildToneLUT(brightness, curveAmount);
       const satFactor = 1 + saturation / 100;
       const gains = autoWb ? getWhiteBalanceGains() : null;
@@ -1724,6 +1961,19 @@ html.ui-mobile .control-row {
           r0 = clamp8(r0 * gains.r);
           g0 = clamp8(g0 * gains.g);
           b0 = clamp8(b0 * gains.b);
+        }
+
+        // The manual shadow/highlight picks are a targeted top-up on
+        // whatever cast Auto WB left behind, so they're applied right
+        // after it, from the same r0/g0/b0 -- see sampleBaseColorAt,
+        // which samples at this exact pipeline stage so a freshly-picked
+        // point comes out neutral.
+        if (manualWbLUT) {
+          const l = Math.round((r0 + g0 + b0) / 3);
+          const li = l < 0 ? 0 : l > 255 ? 255 : l;
+          r0 = clamp8(r0 * manualWbLUT.r[li]);
+          g0 = clamp8(g0 * manualWbLUT.g[li]);
+          b0 = clamp8(b0 * manualWbLUT.b[li]);
         }
 
         let r = r0, g = g0, b = b0;
@@ -1932,6 +2182,9 @@ html.ui-mobile .control-row {
     }
     if (levelLineActive) {
       drawLevelLineOverlay();
+    }
+    if (wbPickMode) {
+      drawWbPickOverlay(layout);
     }
   }
 
@@ -2151,7 +2404,11 @@ html.ui-mobile .control-row {
   // normally float on top of (or sit just above) the photo step aside
   // while either one is active, and come back once neither is.
   function updateOverlayControlsVisibility() {
-    const busy = cropAdjusting || levelLineActive;
+    // wbPickMode joins crop/level-line here for the same reason: the
+    // undo/redo/zoom toolbar floats over the canvas's top-left corner, and
+    // a suggested WB dot that happens to land there would otherwise be
+    // hidden behind it.
+    const busy = cropAdjusting || levelLineActive || !!wbPickMode;
     canvasToolbarLeft.hidden = busy;
     compareBtn.hidden = busy;
     transformRow.hidden = busy;
@@ -2167,6 +2424,7 @@ html.ui-mobile .control-row {
 
   function enterCropAdjust() {
     if (!currentImage || cropAdjusting) return;
+    if (wbPickMode) exitWbPickMode();
     if (compareMode) {
       compareMode = false;
       compareBtn.classList.remove("active");
@@ -2363,6 +2621,7 @@ html.ui-mobile .control-row {
 
   function enterLevelLineMode() {
     if (!currentImage || levelLineActive || cropAdjusting) return;
+    if (wbPickMode) exitWbPickMode();
     if (compareMode) {
       compareMode = false;
       compareBtn.classList.remove("active");
@@ -2475,6 +2734,123 @@ html.ui-mobile .control-row {
     }
   }
 
+  // ---- Manual white-balance eyedroppers ---------------------------------
+  //
+  // Two small picks, independent of Auto WB: tap a shadow (or highlight)
+  // area of the photo and that exact point is neutralized, with the
+  // correction fading out smoothly toward the other end of the tone
+  // range (see buildManualWbGainLUT). While a pick is active, a handful
+  // of auto-suggested candidate points are shown as color-coded dots --
+  // navy for shadow, yellow for highlight, matching the button that's
+  // doing the picking -- but tapping anywhere on the photo works, not
+  // just on a dot.
+
+  function updateWbPickButtonStates() {
+    wbPickShadowBtn.classList.toggle("active", wbPickMode === "shadow");
+    wbPickHighlightBtn.classList.toggle("active", wbPickMode === "highlight");
+    wbPickShadowBtn.classList.toggle("picked", !!wbShadowPick);
+    wbPickHighlightBtn.classList.toggle("picked", !!wbHighlightPick);
+    // The tooltip doubles as the discoverability hint for how to remove a
+    // pick -- tapping the same button again once it's set, rather than
+    // reaching for the general Undo button.
+    wbPickShadowBtn.title = wbShadowPick
+      ? "Shadow point picked -- tap to remove it"
+      : "Tap, then tap a shadow point on the photo to fix any remaining color cast there";
+    wbPickHighlightBtn.title = wbHighlightPick
+      ? "Highlight point picked -- tap to remove it"
+      : "Tap, then tap a highlight point on the photo to fix any remaining color cast there";
+  }
+
+  function exitWbPickMode() {
+    wbPickMode = null;
+    wbPickCandidates = null;
+    canvas.classList.remove("wb-picking");
+    updateWbPickButtonStates();
+    updateOverlayControlsVisibility();
+    render();
+  }
+
+  function enterWbPickMode(mode) {
+    if (!currentImage || cropAdjusting || levelLineActive) return;
+    if (compareMode) {
+      compareMode = false;
+      compareBtn.classList.remove("active");
+      compareBtn.textContent = "Compare";
+      canvas.classList.remove("comparing");
+    }
+    wbPickMode = mode;
+    const layout = computeLayout();
+    wbPickCandidates = findWbCandidates(mode, layout.imgW, layout.imgH, layout.cropRect);
+    canvas.classList.add("wb-picking");
+    updateWbPickButtonStates();
+    updateOverlayControlsVisibility();
+    render();
+  }
+
+  // Removes a committed pick outright -- the ordinary way to back out of
+  // one, rather than reaching for the general Undo button (which would
+  // also walk back anything else done since). Each eyedropper button is a
+  // simple three-state toggle: tap once to start picking, tap the photo
+  // to commit, tap the button again to remove that pick entirely. To
+  // replace a pick with a different point, remove it first, then pick
+  // again -- keeps "what does this tap do" unambiguous at every step.
+  function clearWbPick(mode) {
+    if (mode === "shadow") wbShadowPick = null;
+    else wbHighlightPick = null;
+    updateWbPickButtonStates();
+    render();
+    pushHistory();
+  }
+
+  wbPickShadowBtn.addEventListener("click", () => {
+    if (wbPickMode === "shadow") exitWbPickMode();
+    else if (wbShadowPick) clearWbPick("shadow");
+    else enterWbPickMode("shadow");
+  });
+  wbPickHighlightBtn.addEventListener("click", () => {
+    if (wbPickMode === "highlight") exitWbPickMode();
+    else if (wbHighlightPick) clearWbPick("highlight");
+    else enterWbPickMode("highlight");
+  });
+
+  canvas.addEventListener("pointerdown", (e) => {
+    if (!wbPickMode) return;
+    const layout = computeLayout();
+    const pt = canvasPointToPixel(e);
+    const px = pt.x - (layout.offsetX + layout.left);
+    const py = pt.y - (layout.offsetY + layout.top);
+    if (px < 0 || py < 0 || px >= layout.imgW || py >= layout.imgH) return;
+    const sampled = sampleBaseColorAt(px, py, layout.imgW, layout.imgH, layout.cropRect);
+    const result = computeNeutralizeGain(sampled.r, sampled.g, sampled.b);
+    if (wbPickMode === "shadow") wbShadowPick = result;
+    else wbHighlightPick = result;
+    pushHistory();
+    exitWbPickMode();
+  });
+
+  function drawWbPickOverlay(layout) {
+    if (!wbPickCandidates || wbPickCandidates.length === 0) return;
+    const scale = canvasDisplayScale();
+    const fillColor = wbPickMode === "shadow" ? "#1c293c" : "#fdc800";
+    const ringColor = wbPickMode === "shadow" ? "#fdc800" : "#1c293c";
+    const originX = layout.offsetX + layout.left;
+    const originY = layout.offsetY + layout.top;
+    ctx.save();
+    for (const p of wbPickCandidates) {
+      const cx = originX + p.x;
+      const cy = originY + p.y;
+      const r = 9 * scale;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+      ctx.lineWidth = 2.5 * scale;
+      ctx.strokeStyle = ringColor;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   function drawStraightenGrid(layout) {
     const scale = canvasDisplayScale();
     const divisions = 8;
@@ -2506,6 +2882,7 @@ html.ui-mobile .control-row {
 
   compareBtn.addEventListener("click", () => {
     if (cropAdjusting || levelLineActive) return;
+    if (wbPickMode) exitWbPickMode();
     compareMode = !compareMode;
     compareBtn.classList.toggle("active", compareMode);
     compareBtn.textContent = compareMode ? "Done" : "Compare";
@@ -2625,6 +3002,8 @@ html.ui-mobile .control-row {
       flipH,
       flipV,
       fineRotation,
+      wbShadowPick: wbShadowPick ? { lum: wbShadowPick.lum, gain: { ...wbShadowPick.gain } } : null,
+      wbHighlightPick: wbHighlightPick ? { lum: wbHighlightPick.lum, gain: { ...wbHighlightPick.gain } } : null,
     };
   }
 
@@ -2650,6 +3029,12 @@ html.ui-mobile .control-row {
     fineRotation = s.fineRotation || 0;
     fineRotateSlider.value = String(fineRotation);
     fineRotateValue.textContent = `${fineRotation}°`;
+    wbShadowPick = s.wbShadowPick ? { lum: s.wbShadowPick.lum, gain: { ...s.wbShadowPick.gain } } : null;
+    wbHighlightPick = s.wbHighlightPick ? { lum: s.wbHighlightPick.lum, gain: { ...s.wbHighlightPick.gain } } : null;
+    wbPickMode = null;
+    wbPickCandidates = null;
+    canvas.classList.remove("wb-picking");
+    updateWbPickButtonStates();
     rotatedFullCanvas = null;
     rotatedFullKey = null;
     updateCropUiVisibility();
@@ -2848,6 +3233,25 @@ html.ui-mobile .control-row {
     return new Promise((resolve) => sourceCanvas.toBlob(resolve, mimeType, quality));
   }
 
+  // The on-screen #canvas is also a scratchpad for whatever tool is active
+  // right now -- the Compare split, the crop-adjust mask/handles, the
+  // straighten grid, the Level-line guide -- none of which should ever end
+  // up in a saved file. Exporting used to just snapshot that live canvas
+  // directly, so saving while e.g. Compare was on saved the before/after
+  // split image instead of the finished photo. This rebuilds the frame
+  // from scratch on its own offscreen canvas -- the same draw as a normal
+  // render(), minus every interactive overlay -- so Save always reflects
+  // the actual edits regardless of what the preview happens to be showing.
+  function buildExportCanvas() {
+    const layout = computeLayout();
+    const exportCanvas = document.createElement("canvas");
+    exportCanvas.width = layout.canvasW;
+    exportCanvas.height = layout.canvasH;
+    const adjustedPhoto = getAdjustedPhotoCanvas(layout.imgW, layout.imgH, layout.cropRect);
+    drawFrame(exportCanvas.getContext("2d"), adjustedPhoto, layout);
+    return exportCanvas;
+  }
+
   function formatBytes(bytes) {
     if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + " MB";
     if (bytes >= 1024) return Math.round(bytes / 1024) + " KB";
@@ -2876,12 +3280,13 @@ html.ui-mobile .control-row {
   //     (this is the only path that can introduce real compression
   //     artifacts, and it only kicks in for extremely tight limits).
   async function exportUnderSizeLimit(maxBytes) {
-    const fullPng = await canvasToBlob(canvas, "image/png");
+    const exportCanvas = buildExportCanvas();
+    const fullPng = await canvasToBlob(exportCanvas, "image/png");
     if (fullPng.size <= maxBytes) {
       return { blob: fullPng, ext: "png", method: "original" };
     }
 
-    const smallestPng = await canvasToBlob(makeScaledCanvas(canvas, MIN_LOSSLESS_SCALE), "image/png");
+    const smallestPng = await canvasToBlob(makeScaledCanvas(exportCanvas, MIN_LOSSLESS_SCALE), "image/png");
     if (smallestPng.size <= maxBytes) {
       // Binary-search for the largest scale, between our smallest-tried
       // scale and full size, whose lossless PNG still fits.
@@ -2891,7 +3296,7 @@ html.ui-mobile .control-row {
       let bestBlob = smallestPng;
       for (let i = 0; i < 8; i++) {
         const mid = (lo + hi) / 2;
-        const candidate = await canvasToBlob(makeScaledCanvas(canvas, mid), "image/png");
+        const candidate = await canvasToBlob(makeScaledCanvas(exportCanvas, mid), "image/png");
         if (candidate.size <= maxBytes) {
           bestScale = mid;
           bestBlob = candidate;
@@ -2905,7 +3310,7 @@ html.ui-mobile .control-row {
 
     // Even the smallest lossless PNG doesn't fit -- lossy JPEG is the only
     // way left to hit this limit. Maximize quality at that same small size.
-    const tinyCanvas = makeScaledCanvas(canvas, MIN_LOSSLESS_SCALE);
+    const tinyCanvas = makeScaledCanvas(exportCanvas, MIN_LOSSLESS_SCALE);
     let lo = 0.05;
     let hi = 0.95;
     const lowestJpeg = await canvasToBlob(tinyCanvas, "image/jpeg", lo);
@@ -2941,7 +3346,7 @@ html.ui-mobile .control-row {
     statusLine.hidden = true;
 
     if (!maxSizeToggle.checked) {
-      const blob = await canvasToBlob(canvas, "image/png");
+      const blob = await canvasToBlob(buildExportCanvas(), "image/png");
       triggerDownload(blob, `${currentFileBaseName}-bordered.png`);
       return;
     }
